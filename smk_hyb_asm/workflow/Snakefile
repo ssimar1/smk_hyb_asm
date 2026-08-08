@@ -1,0 +1,1122 @@
+"""
+Snakemake pipeline for hybrid capture virome sequencing analysis.
+Decompresses reads, runs EsViritu for viral detection, and optionally runs
+metaviralSPADES + minimus2 for hybrid assembly.
+
+Version: 0.2.0
+"""
+
+__version__ = "0.2.0"
+
+import os
+import sys
+from pathlib import Path
+
+import pandas as pd
+from snakemake.utils import min_version
+
+min_version("8.0")
+
+shell.prefix("set -eo pipefail; ")
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+configfile: "config/config.yaml"
+
+# -----------------------------------------------------------------------------
+# Global options from config
+# -----------------------------------------------------------------------------
+POOL_ID = config["pool_id"]
+SAMPLE_SHEET = config["sample_sheet"]
+ESVIRITU_DB = config["esviritu_db"]
+VECTOR_FASTA = config.get("vector_fasta", "resources/vector_sequences.fasta")
+HOST_FASTA = config.get("host_fasta", "/biolib/prod/db/chm13v2phix/chm13v2phix.fa")
+
+OUTPUT_ROOT = Path(config.get("output_root", "results"))
+TEMP_ROOT = OUTPUT_ROOT / "temp"
+ESVIRITU_ROOT = OUTPUT_ROOT / "esviritu"
+VIRUS_READS_ROOT = OUTPUT_ROOT / "virus_reads"
+
+# New: Hybrid assembly output directories
+METAVIRALSPADES_ROOT = OUTPUT_ROOT / "metaviralspades"
+HYBRID_ROOT = OUTPUT_ROOT / "hybrid_assembly"
+
+DECOMPRESS_THREADS = config.get("decompress_threads", 4)
+FASTP_THREADS = config.get("fastp_threads", 8)
+VRR_THREADS = config.get("vrr_threads", 4)
+HOST_THREADS = config.get("host_threads", 8)
+ESVIRITU_THREADS = config.get("esviritu_threads", 4)
+
+DECOMPRESS_MEM_MB = config.get("decompress_mem_mb", 8000)
+FASTP_MEM_MB = config.get("fastp_mem_mb", 16000)
+VRR_MEM_MB = config.get("vrr_mem_mb", 8000)
+HOST_MEM_MB = config.get("host_mem_mb", 8000)
+ESVIRITU_MEM_MB = config.get("esviritu_mem_mb", 8000)
+
+# New: Hybrid assembly resource allocation
+METAVIRALSPADES_THREADS = config.get("metaviralspades_threads", 16)
+METAVIRALSPADES_MEM_MB = config.get("metaviralspades_mem_mb", 64000)
+CHECKV_THREADS = config.get("checkv_threads", 16)
+CHECKV_MEM_MB = config.get("checkv_mem_mb", 16000)
+MERGE_THREADS = config.get("merge_threads", 4)
+MERGE_MEM_MB = config.get("merge_mem_mb", 16000)
+MERGE_MIN_OVERLAP = config.get("merge_min_overlap", 500)
+MERGE_MIN_IDENTITY = config.get("merge_min_identity", 95)
+
+# New: Hybrid assembly parameters
+CHECKV_DB = config.get("checkv_db", "/data/prod/db/checkv/v1.5")
+MIN_CONTIG_LENGTH = config.get("min_contig_length", 500)
+CHECKV_QUALITY = config.get("checkv_quality", ["Complete", "High-quality", "Medium-quality"])
+
+# Pipeline stage flags
+RUN_QC = config.get("run_qc", True)
+RUN_ASSEMBLIES = config.get("run_assemblies", True)
+RUN_ESVIRITU = config.get("run_esviritu", True)
+RUN_METAVIRALSPADES = config.get("run_metaviralspades", False)
+RUN_CHECKV = config.get("run_checkv", False)
+RUN_PRE_MERGE = config.get("run_pre_merge", False)
+RUN_HYBRID = config.get("run_hybrid", False)
+
+
+# =============================================================================
+# Sample sheet parsing
+# =============================================================================
+def load_sample_sheet(path):
+    """Load and validate sample sheet, returning a DataFrame."""
+    df = pd.read_csv(path, sep="\t", dtype=str)
+    required_cols = ["Sample_ID", "forward_read", "reverse_read", "read_compression", "category"]
+    missing = set(required_cols) - set(df.columns)
+    if missing:
+        sys.exit(f"[ERROR] Sample sheet missing required columns: {missing}")
+    
+    # Because I'm lazy-- instead of changing all the unique id info, just copy sample_id to unique_id in the df (I don't need pool IDs for my data, at least right now)
+    df["unique_id"] = df["Sample_ID"]
+    return df
+
+
+SAMPLES = load_sample_sheet(SAMPLE_SHEET)
+
+# Build lookup dictionaries for easy access in rules
+SAMPLE_INFO = SAMPLES.set_index("unique_id").to_dict(orient="index")
+UNIQUE_IDS = SAMPLES["unique_id"].tolist()
+CATEGORIES = SAMPLES["category"].unique().tolist()
+
+sys.stderr.write(f"[INFO] Loaded {len(UNIQUE_IDS)} samples from {SAMPLE_SHEET}\n")
+
+
+# =============================================================================
+# Helper functions
+# =============================================================================
+def get_sample_attr(wildcards, attr):
+    """Get attribute for a sample by unique_id."""
+    return SAMPLE_INFO[wildcards.unique_id][attr]
+
+
+def get_compression_type(wildcards):
+    """Return compression type for a sample."""
+    return get_sample_attr(wildcards, "read_compression")
+
+
+def get_r1_input(wildcards):
+    """Get forward read path for a sample."""
+    return get_sample_attr(wildcards, "forward_read")
+
+
+def get_r2_input(wildcards):
+    """Get reverse read path for a sample."""
+    return get_sample_attr(wildcards, "reverse_read")
+
+
+def get_category(wildcards):
+    """Get category for a sample."""
+    return get_sample_attr(wildcards, "category")
+
+
+def get_esviritu_outputs_for_category(wildcards):
+    """Get all EsViritu info.tsv outputs for a given category."""
+    category_samples = SAMPLES[SAMPLES["category"] == wildcards.category]["unique_id"].tolist()
+    return expand(
+        str(ESVIRITU_ROOT / wildcards.category / f"esviritu_{POOL_ID}" / "{unique_id}.detected_virus.info.tsv"),
+        unique_id=category_samples,
+    )
+
+
+def get_all_inputs(wildcards):
+    """Build list of target files based on pipeline stage flags."""
+    inputs = []
+    
+    if RUN_ESVIRITU:
+        # EsViritu outputs
+        inputs.extend(expand(
+            str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}.detected_virus.info.tsv"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        # EsViritu summary per category
+        inputs.extend(expand(
+            str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / f"esviritu_{POOL_ID}.detected_virus.info.tsv"),
+            category=CATEGORIES,
+        ))
+    
+    if RUN_METAVIRALSPADES:
+        # metaviralSPADES outputs
+        inputs.extend(expand(
+            str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+    
+    if RUN_CHECKV:
+        # CheckV outputs
+        inputs.extend(expand(
+            str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        inputs.extend(expand(
+            str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+    
+    if RUN_PRE_MERGE:
+        # Renamed contigs and pre-merge stats
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "esviritu_renamed.fasta"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "stats" / "{unique_id}_pre_merge_stats.txt"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+    
+    if RUN_HYBRID:
+        # Hybrid assembly outputs
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_hybrid.fasta"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        # Merge decision reports
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_merge_decisions.tsv"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "stats" / "{unique_id}_assembly_stats.txt"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        # Community classification outputs
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_community_summary.tsv"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+        inputs.extend(expand(
+            str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_per_contig_identity.tsv"),
+            zip,
+            unique_id=UNIQUE_IDS,
+            category=SAMPLES["category"].tolist(),
+        ))
+    
+    return inputs
+
+
+# =============================================================================
+# Target rules
+# =============================================================================
+rule all:
+    input:
+        get_all_inputs
+
+
+# =============================================================================
+# Local rules (not submitted to cluster)
+# =============================================================================
+localrules:
+    all,
+    summarize_esviritu,
+    rename_metaviral,
+    rename_esviritu_with_segments,
+    pre_merge_stats,
+    final_stats,
+
+
+# =============================================================================
+# Wildcard constraints
+# =============================================================================
+wildcard_constraints:
+    unique_id="|".join(UNIQUE_IDS),
+    category="sample|control",
+
+
+# =============================================================================
+# Module: Preprocessing - Decompression
+# =============================================================================
+rule decompress_reads:
+    """Decompress forward and reverse reads to temporary directory."""
+    input:
+        r1=get_r1_input,
+        r2=get_r2_input,
+    output:
+        r1=temp(str(TEMP_ROOT / "{category}" / "01_decompress" / "{unique_id}.R1.fastq")),
+        r2=temp(str(TEMP_ROOT / "{category}" / "01_decompress" / "{unique_id}.R2.fastq")),
+    log:
+        str(OUTPUT_ROOT / "logs" / "01_decompress" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/preprocess.yaml"
+    threads: DECOMPRESS_THREADS
+    resources:
+        mem_mb=DECOMPRESS_MEM_MB,
+        runtime=30,
+        partition="cmmr",
+    params:
+        compression=get_compression_type,
+    shell:
+        """
+        (
+            echo "[$(date)] Decompressing R1: {input.r1}"
+            if [ "{params.compression}" == "gz" ]; then
+               timeout 600s  pigz -dc -p {threads} < {input.r1} > {output.r1}
+            elif [ "{params.compression}" == "bz2" ]; then
+                timeout 600s pbzip2 -d -c -p{threads} < {input.r1} > {output.r1}
+            else
+                echo "ERROR: Unknown compression type: {params.compression}" >&2
+                exit 1
+            fi
+            
+            echo "[$(date)] Decompressing R2: {input.r2}"
+            if [ "{params.compression}" == "gz" ]; then
+                timeout 600s pigz -dc -p {threads} < {input.r2} > {output.r2}
+            elif [ "{params.compression}" == "bz2" ]; then
+                timeout 600s pbzip2 -d -c -p{threads} < {input.r2} > {output.r2}
+            else
+                echo "ERROR: Unknown compression type: {params.compression}" >&2
+                exit 1
+            fi
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+
+# =============================================================================
+# Module: Preprocessing - Quality Filtering (fastp)
+# =============================================================================
+rule fastp_qc:
+    """Quality filter reads using fastp."""
+    input:
+        r1=str(TEMP_ROOT / "{category}" / "01_decompress" / "{unique_id}.R1.fastq"),
+        r2=str(TEMP_ROOT / "{category}" / "01_decompress" / "{unique_id}.R2.fastq"),
+    output:
+        r1=temp(str(TEMP_ROOT / "{category}" / "02_fastp" / "{unique_id}.R1.fastq")),
+        r2=temp(str(TEMP_ROOT / "{category}" / "02_fastp" / "{unique_id}.R2.fastq")),
+        html=str(OUTPUT_ROOT / "qc" / "fastp" / "{category}" / "{unique_id}.fastp.html"),
+        json=str(OUTPUT_ROOT / "qc" / "fastp" / "{category}" / "{unique_id}.fastp.json"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "02_fastp" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/preprocess.yaml"
+    threads: FASTP_THREADS
+    resources:
+        mem_mb=FASTP_MEM_MB,
+        partition="cmmr",
+    shell:
+        """
+        (
+            echo "[$(date)] Running fastp for {wildcards.unique_id}"
+            
+            fastp \
+                --in1 {input.r1} \
+                --in2 {input.r2} \
+                --out1 {output.r1} \
+                --out2 {output.r2} \
+                --html {output.html} \
+                --json {output.json} \
+                --thread {threads}
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+
+# =============================================================================
+# Module: Preprocessing - Deduplication (fastp)
+# =============================================================================
+rule fastp_dedup:
+    """Remove PCR duplicates using fastp."""
+    input:
+        r1=str(TEMP_ROOT / "{category}" / "02_fastp" / "{unique_id}.R1.fastq"),
+        r2=str(TEMP_ROOT / "{category}" / "02_fastp" / "{unique_id}.R2.fastq"),
+    output:
+        r1=temp(str(TEMP_ROOT / "{category}" / "03_dedup" / "{unique_id}.R1.fastq")),
+        r2=temp(str(TEMP_ROOT / "{category}" / "03_dedup" / "{unique_id}.R2.fastq")),
+        html=str(OUTPUT_ROOT / "qc" / "fastp_dedup" / "{category}" / "{unique_id}.dedup.html"),
+        json=str(OUTPUT_ROOT / "qc" / "fastp_dedup" / "{category}" / "{unique_id}.dedup.json"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "03_dedup" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/preprocess.yaml"
+    threads: FASTP_THREADS
+    resources:
+        mem_mb=FASTP_MEM_MB,
+        partition="cmmr",
+    shell:
+        """
+        (
+            echo "[$(date)] Running fastp deduplication for {wildcards.unique_id}"
+            
+            fastp \
+                --dedup \
+                --disable_trim_poly_g \
+                --disable_adapter_trimming \
+                --disable_quality_filtering \
+                --disable_length_filtering \
+                --in1 {input.r1} \
+                --in2 {input.r2} \
+                --out1 {output.r1} \
+                --out2 {output.r2} \
+                --html {output.html} \
+                --json {output.json} \
+                --report_title {wildcards.unique_id} \
+                --thread {threads}
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+# =============================================================================
+# Module: Preprocessing - Vector Read Removal
+# =============================================================================
+rule vector_read_removal:
+    """Remove reads aligning to vector sequences using vrr."""
+    input:
+        r1=str(TEMP_ROOT / "{category}" / "03_dedup" / "{unique_id}.R1.fastq"),
+        r2=str(TEMP_ROOT / "{category}" / "03_dedup" / "{unique_id}.R2.fastq"),
+        ref=VECTOR_FASTA,
+    output:
+        r1=temp(str(TEMP_ROOT / "{category}" / "04_vrr" / "{unique_id}.R1.fastq")),
+        r2=temp(str(TEMP_ROOT / "{category}" / "04_vrr" / "{unique_id}.R2.fastq")),
+        csv=temp(str(TEMP_ROOT / "{category}" / "04_vrr" / "{unique_id}_primary_alignments.csv")),
+    log:
+        str(OUTPUT_ROOT / "logs" / "04_vrr" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/preprocess.yaml"
+    threads: VRR_THREADS
+    resources:
+        mem_mb=VRR_MEM_MB,
+        partition="cmmr",
+    params:
+        out_prefix=lambda wc: str(TEMP_ROOT / wc.category / "04_vrr" / wc.unique_id),
+    shell:
+        """
+        (
+            echo "[$(date)] Running vector read removal for {wildcards.unique_id}"
+            
+            vrr \
+                -1 {input.r1} \
+                -2 {input.r2} \
+                -r {input.ref} \
+                -o {params.out_prefix} \
+                -t {threads} \
+                --nm-threshold 4
+            
+            # vrr outputs as <prefix>_R1.fastq and <prefix>_R2.fastq
+            # Rename to match expected output pattern (R1/R2 use dot, vrr uses underscore)
+            mv {params.out_prefix}_R1.fastq {output.r1}
+            mv {params.out_prefix}_R2.fastq {output.r2}
+            # CSV is already in correct location (no rename needed)
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+# =============================================================================
+# Module: Preprocessing - Human Host Removal
+# =============================================================================
+rule host_removal:
+    """Remove host reads using minimap2"""
+    input:
+        r1=(str(TEMP_ROOT / "{category}" / "04_vrr" / "{unique_id}.R1.fastq")),
+        r2=(str(TEMP_ROOT / "{category}" / "04_vrr" / "{unique_id}.R2.fastq")),
+        ref=HOST_FASTA,
+    output:
+        r1=temp(str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R1.fastq")),
+        r2=temp(str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R2.fastq")),
+    log:
+        str(OUTPUT_ROOT / "logs" / "05_host_removed" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/preprocess.yaml"
+    threads: HOST_THREADS
+    resources:
+        mem_mb=HOST_MEM_MB,
+        partition="cmmr",
+    shell:
+        """
+        (
+            echo "[$(date)] Running host read removal for {wildcards.unique_id}"
+            
+            minimap2 -t {threads} -ax sr -K 500M {input.ref} \
+                {input.r1} \
+                {input.r2} \
+                2>> {log} | \
+            samtools view -bS - | \
+            samtools sort -n - | \
+            samtools fastq -f 12 \
+                -1 {output.r1} \
+                -2 {output.r2} -
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+# =============================================================================
+# Module: Virome Analysis - EsViritu
+# =============================================================================
+rule esviritu:
+    """Run EsViritu for viral detection and profiling."""
+    input:
+        r1=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R1.fastq"),
+        r2=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R2.fastq"),
+    output:
+        info=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}.detected_virus.info.tsv"),
+        assembly=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}.detected_virus.assembly_summary.tsv"),
+        tax_profile=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}.tax_profile.tsv"),
+        coverage=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}.virus_coverage_windows.tsv"),
+        bam=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}_temp" / "{unique_id}.third.filt.sorted.bam"),
+        # New: EsViritu outputs as {unique_id}_final_consensus.fasta
+        contigs=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}_final_consensus.fasta") if RUN_PRE_MERGE or RUN_HYBRID else [],
+    log:
+        str(OUTPUT_ROOT / "logs" / "esviritu" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/esviritu.yaml"
+    threads: ESVIRITU_THREADS
+    resources:
+        mem_mb=ESVIRITU_MEM_MB,
+        partition="cmmr",
+    params:
+        db=ESVIRITU_DB,
+        out_dir=lambda wc: str(ESVIRITU_ROOT / wc.category / wc.unique_id),
+        sample_name=lambda wc: wc.unique_id,
+    shell:
+        """
+        (
+            echo "[$(date)] Running EsViritu for {wildcards.unique_id}"
+            
+            EsViritu \
+                -r {input.r1} {input.r2} \
+                -s {params.sample_name} \
+                -o {params.out_dir} \
+                --db {params.db} \
+                -q F \
+                --keep T \
+                -t {threads} || true
+            
+            echo "[$(date)] Checking for expected output files..."
+            
+            # Create dummy output files if EsViritu didn't produce them
+            # (e.g., negative controls or samples with no viral hits)
+            if [ ! -f "{output.info}" ]; then
+                echo "[$(date)] Creating empty file: {output.info}"
+                touch "{output.info}"
+            fi
+            if [ ! -f "{output.assembly}" ]; then
+                echo "[$(date)] Creating empty file: {output.assembly}"
+                touch "{output.assembly}"
+            fi
+            if [ ! -f "{output.tax_profile}" ]; then
+                echo "[$(date)] Creating empty file: {output.tax_profile}"
+                touch "{output.tax_profile}"
+            fi
+            if [ ! -f "{output.coverage}" ]; then
+                echo "[$(date)] Creating empty file: {output.coverage}"
+                touch "{output.coverage}"
+            fi
+            if [ ! -f "{output.bam}" ]; then
+                echo "[$(date)] Creating empty file: {output.bam}"
+                touch "{output.bam}"
+            fi
+            # Compress BAM file and clean up EsViritu temp directory
+            echo "[$(date)] Cleaning up EsViritu temp directory..."
+            if [ -d "{params.temp_dir}" ]; then
+                TEMP_SIZE_BEFORE=$(du -sh "{params.temp_dir}" | cut -f1)
+                echo "[$(date)] Temp directory size before cleanup: $TEMP_SIZE_BEFORE"
+                
+                # Compress BAM file if it exists and is not empty
+                if [ -s "{output.bam}" ]; then
+                    # Compress with samtools (creates .bam.gz)
+                    samtools view -@ {threads} -b -h "{output.bam}" | \
+                        gzip -c > "{output.bam}.gz"
+                    
+                    # Remove original uncompressed BAM and index
+                    rm -f "{output.bam}" "{output.bam}.bai"
+                fi
+                
+                # Delete all other files in temp directory (keeps only .bam.gz)
+                echo "[$(date)] Removing other temp files..."
+                find "{params.temp_dir}" -type f \
+                    ! -name "*.bam.gz" \
+                    -delete
+            else
+                echo "[$(date)] No temp directory found to clean up"
+            fi
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+# =============================================================================
+# Module: Virome Analysis - EsViritu Summary
+# =============================================================================
+rule summarize_esviritu:
+    """Summarize all EsViritu runs for a category."""
+    input:
+        get_esviritu_outputs_for_category,
+    output:
+        info=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / f"esviritu_{POOL_ID}.detected_virus.info.tsv"),
+        assembly=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / f"esviritu_{POOL_ID}.detected_virus.assembly_summary.tsv"),
+        tax=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / f"esviritu_{POOL_ID}.tax_profile.tsv"),
+        html=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / f"esviritu_{POOL_ID}_EsViritu_project_reactable.html"),
+        cov=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / f"esviritu_{POOL_ID}.virus_coverage_windows.tsv"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "esviritu_summary" / "{category}.log"),
+    conda:
+        "envs/esviritu.yaml"
+    params:
+        esv_dir=lambda wc: str(ESVIRITU_ROOT / wc.category),
+        basename=f"esviritu_{POOL_ID}",
+    shell:
+        """
+        (
+            echo "[$(date)] Summarizing EsViritu runs for {wildcards.category}"
+            
+            # Run summarize_esv_runs (outputs to current working directory)
+            summarize_esv_runs {params.esv_dir} || true
+            
+            # Move generated files to the correct directory
+            for suffix in .detected_virus.info.tsv .detected_virus.assembly_summary.tsv .tax_profile.tsv _EsViritu_project_reactable.html .virus_coverage_windows.tsv; do
+                src="{params.basename}${{suffix}}"
+                dest="{params.esv_dir}/{params.basename}${{suffix}}"
+                if [ -f "$src" ]; then
+                    echo "[$(date)] Moving $src to $dest"
+                    mv "$src" "$dest"
+                else
+                    echo "[$(date)] Creating empty file: $dest"
+                    touch "$dest"
+                fi
+            done
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+
+# =============================================================================
+# Module: Hybrid Assembly - metaviralSPADES
+# =============================================================================
+rule metaviralspades:
+    """Run metaviralSPADES for de novo viral assembly."""
+    input:
+        r1=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R1.fastq"),
+        r2=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R2.fastq"),
+    output:
+        contigs=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
+        scaffolds=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "scaffolds.fasta"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "metaviralspades" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    threads: METAVIRALSPADES_THREADS
+    resources:
+        mem_mb=METAVIRALSPADES_MEM_MB,
+        partition="cmmr",
+    params:
+        outdir=lambda wc: str(METAVIRALSPADES_ROOT / wc.category / wc.unique_id),
+    shell:
+        """
+        (
+            echo "[$(date)] Running metaviralSPADES for {wildcards.unique_id}"
+            
+            metaviralspades.py \
+                -1 {input.r1} \
+                -2 {input.r2} \
+                -o {params.outdir} \
+                -t {threads} \
+                -m $(({resources.mem_mb} / 1024)) \
+                2>&1
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+
+# =============================================================================
+# Module: Hybrid Assembly - Quality Filtering
+# =============================================================================
+rule filter_metaviral:
+    """Filter short contigs from metaviralSPADES output."""
+    input:
+        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
+    output:
+        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "filter_metaviral" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    params:
+        minlen=MIN_CONTIG_LENGTH,
+    shell:
+        """
+        (
+            echo "[$(date)] Filtering contigs < {params.minlen} bp for {wildcards.unique_id}"
+            seqkit seq -m {params.minlen} {input} > {output}
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+
+rule checkv:
+    """Run CheckV quality assessment on metaviralSPADES contigs."""
+    input:
+        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
+    output:
+        summary=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
+        completeness=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "completeness.tsv"),
+        contamination=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "contamination.tsv"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "checkv" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    threads: CHECKV_THREADS
+    resources:
+        mem_mb=CHECKV_MEM_MB,
+        partition="cmmr",
+    params:
+        outdir=lambda wc: str(METAVIRALSPADES_ROOT / wc.category / wc.unique_id / "checkv"),
+        db=CHECKV_DB,
+    shell:
+        """
+        (
+            echo "[$(date)] Running CheckV for {wildcards.unique_id}"
+            
+            checkv end_to_end {input} {params.outdir} \
+                -t {threads} \
+                -d {params.db}
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+
+rule extract_quality_contigs:
+    """Extract high-quality contigs based on CheckV results."""
+    input:
+        fasta=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
+        summary=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
+    output:
+        ids=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "good_contigs.txt"),
+        fasta=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "extract_quality" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    params:
+        quality_levels=CHECKV_QUALITY,
+    run:
+        import pandas as pd
+        
+        # Read CheckV summary
+        df = pd.read_csv(input.summary, sep='\t')
+        
+        # Filter by quality
+        quality_contigs = df[df['checkv_quality'].isin(params.quality_levels)]['contig_id'].tolist()
+        
+        # Write IDs to file
+        with open(output.ids, 'w') as f:
+            for contig_id in quality_contigs:
+                f.write(f"{contig_id}\n")
+        
+        # Extract sequences
+        shell("seqkit grep -f {output.ids} {input.fasta} > {output.fasta} 2> {log}")
+
+
+# =============================================================================
+# Module: Hybrid Assembly - Prepare for Merging
+# =============================================================================
+rule rename_metaviral:
+    """Rename metaviralSPADES contigs to track origin."""
+    input:
+        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
+    output:
+        str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "rename_metaviral" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    shell:
+        """
+        (
+            echo "[$(date)] Renaming metaviralSPADES contigs for {wildcards.unique_id}"
+            seqkit replace -p '(.+)' -r 'metaviral_{{nr}}' {input} > {output}
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+rule rename_esviritu_with_segments:
+    """Rename EsViritu contigs with virus and segment information from database metadata."""
+    input:
+        fasta=str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "{unique_id}_final_consensus.fasta"),
+    output:
+        str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "esviritu_renamed.fasta"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "rename_esviritu" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    params:
+        db_dir=ESVIRITU_DB,
+    run:
+        import pandas as pd
+        from Bio import SeqIO
+        from Bio.SeqRecord import SeqRecord
+        import re
+        from pathlib import Path
+        
+        # Read metadata from EsViritu database
+        metadata_file = Path(params.db_dir) / "virus_pathogen_database.all_metadata.tsv"
+        metadata = pd.read_csv(metadata_file, sep='\t')
+        
+        # Create accession to metadata mapping
+        acc_to_info = {}
+        for _, row in metadata.iterrows():
+            acc = row['Accession']
+            
+            # Get subspecies (more specific than species name)
+            subspecies = row.get('subspecies', '')
+            if pd.notna(subspecies) and subspecies != '""' and subspecies != '':
+                virus_name = subspecies.replace('t__', '').strip()
+            else:
+                virus_name = row.get('Name', 'Unknown').strip()
+            
+            # Clean virus name for use in ID
+            virus_name_clean = virus_name.replace(' ', '_')
+            
+            # Get segment
+            segment = row.get('Segment', '')
+            if pd.notna(segment) and segment != '""' and segment != '':
+                segment = str(segment).strip()
+            else:
+                segment = None
+            
+            acc_to_info[acc] = {
+                'virus_name': virus_name_clean,
+                'segment': segment,
+            }
+        
+        # Rename sequences
+        output_records = []
+        
+        for record in SeqIO.parse(input.fasta, 'fasta'):
+            # Extract accession from header like "KC731482.1_consensus"
+            match = re.match(r'^([A-Z0-9_]+\.\d+)', record.id)
+            
+            if match:
+                acc = match.group(1)
+                
+                if acc in acc_to_info:
+                    info = acc_to_info[acc]
+                    
+                    # Build new ID
+                    if info['segment']:
+                        new_id = f"esviritu_{info['virus_name']}_seg{info['segment']}_{acc}"
+                    else:
+                        new_id = f"esviritu_{info['virus_name']}_{acc}"
+                else:
+                    # Accession not in metadata (shouldn't happen)
+                    new_id = f"esviritu_{record.id}"
+            else:
+                # Couldn't parse accession
+                new_id = f"esviritu_{record.id}"
+            
+            new_record = SeqRecord(
+                record.seq,
+                id=new_id,
+                description=""
+            )
+            output_records.append(new_record)
+        
+        # Write output
+        if output_records:
+            SeqIO.write(output_records, output[0], 'fasta')
+            with open(log[0], 'w') as logfile:
+                logfile.write(f"Renamed {len(output_records)} EsViritu contigs\n")
+        else:
+            # Create empty file
+            open(output[0], 'w').close()
+            with open(log[0], 'w') as logfile:
+                logfile.write(f"Warning: No EsViritu contigs to rename\n")
+
+
+rule pre_merge_stats:
+    """Generate assembly statistics before merging."""
+    input:
+        metaviral=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
+        esviritu=str(HYBRID_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "renamed" / "esviritu_renamed.fasta"),
+    output:
+        str(HYBRID_ROOT / "{category}" / "{unique_id}" / "stats" / "{unique_id}_pre_merge_stats.txt"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "pre_merge_stats" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    shell:
+        """
+        (
+            echo "Pre-merge assembly statistics for {wildcards.unique_id}" > {output}
+            echo "========================================" >> {output}
+            echo "" >> {output}
+            echo "MetaviralSPADES contigs:" >> {output}
+            seqkit stats {input.metaviral} >> {output}
+            echo "" >> {output}
+            echo "EsViritu contigs:" >> {output}
+            seqkit stats {input.esviritu} >> {output}
+        ) &> {log}
+        """
+
+# =============================================================================
+# Module: Hybrid Assembly - Minimap2 Merging
+# =============================================================================
+rule merge_with_read_support:
+    """
+    Merge assemblies with read-based validation using clear decision rules.
+    
+    Decision priority:
+    1. Coverage >2x different → choose higher coverage
+    2. Similar coverage but MAPQ >10 different → choose higher MAPQ
+    3. Similar quality but different length → choose longer
+    """
+    input:
+        metaviral=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
+        esviritu=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "esviritu_renamed.fasta"),
+        r1=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R1.fastq"),
+        r2=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R2.fastq"),
+    output:
+        hybrid=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_hybrid.fasta"),
+        report=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_merge_decisions.tsv"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "merge_read_support" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/smk_hyb_asm.yaml"
+    threads: MERGE_THREADS  # Reuse same thread allocation
+    resources:
+        mem_mb=MERGE_MEM_MB,
+        partition="cmmr",
+    params:
+        workdir=lambda wc: str(HYBRID_ROOT / wc.category / wc.unique_id / "hybrid" / "work"),
+        min_overlap=MERGE_MIN_OVERLAP,
+        min_identity=MERGE_MIN_IDENTITY,
+    shell:
+        """
+        (
+            echo "[$(date)] Merging assemblies with read support for {wildcards.unique_id}"
+            
+            python scripts/merge_with_reads.py \
+                --assembly1 {input.esviritu} \
+                --assembly2 {input.metaviral} \
+                --reads1 {input.r1} \
+                --reads2 {input.r2} \
+                --output {output.hybrid} \
+                --report {output.report} \
+                --threads {threads} \
+                --min-overlap {params.min_overlap} \
+                --min-identity {params.min_identity} \
+                --workdir {params.workdir}
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+rule classify_hybrid_community:
+    """Determine community structure by mapping hybrid contigs to reference database."""
+    input:
+        hybrid=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_hybrid.fasta"),
+    output:
+        summary=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_community_summary.tsv"),
+        per_contig=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_per_contig_identity.tsv"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "classify_community" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/hyb_asm.yaml"
+    params:
+        db_dir=ESVIRITU_DB,
+    threads: 8
+    resources:
+        mem_mb=8000,
+        partition="cmmr",
+    shell:
+        """
+        (
+            echo "[$(date)] Classifying hybrid assembly community for {wildcards.unique_id}"
+            
+            # Find the reference fasta in the database directory
+            REF_FASTA=$(find {params.db_dir} -name "*.fasta" -o -name "*.fa" -o -name "*.fna" | head -n 1)
+            METADATA={params.db_dir}/virus_pathogen_database.all_metadata.tsv
+            
+            # BLAST hybrid contigs against reference database
+            blastn \
+                -query {input.hybrid} \
+                -subject $REF_FASTA \
+                -outfmt "6 qseqid sseqid pident length qlen slen qcovs evalue bitscore" \
+                -max_target_seqs 1 \
+                -num_threads {threads} \
+                -evalue 1e-10 \
+                > {output.summary}.blast
+            
+            # Annotate with metadata
+            python scripts/annotate_community.py \
+                --blast {output.summary}.blast \
+                --metadata $METADATA \
+                --output-summary {output.summary} \
+                --output-per-contig {output.per_contig}
+            
+            rm {output.summary}.blast
+            
+            echo "[$(date)] Done"
+        ) &> {log}
+        """
+
+rule final_stats:
+    """Generate final assembly statistics with community composition."""
+    input:
+        hybrid=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_hybrid.fasta"),
+        pre_stats=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "stats" / "{unique_id}_pre_merge_stats.txt"),
+        merge_decisions=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_merge_decisions.tsv"),
+        community_summary=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_community_summary.tsv"),
+        per_contig=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_per_contig_identity.tsv"),
+    output:
+        str(HYBRID_ROOT / "{category}" / "{unique_id}" / "stats" / "{unique_id}_assembly_stats.txt"),
+    log:
+        str(OUTPUT_ROOT / "logs" / "final_stats" / "{category}" / "{unique_id}.log"),
+    conda:
+        "envs/smk_hyb_asm.yaml"
+    run:
+        import pandas as pd
+        import subprocess
+        
+        with open(output[0], 'w') as f:
+            f.write("="*80 + "\n")
+            f.write(f"FINAL HYBRID ASSEMBLY REPORT: {wildcards.unique_id}\n")
+            f.write("="*80 + "\n\n")
+            
+            # Pre-merge stats
+            f.write("PRE-MERGE ASSEMBLY STATISTICS\n")
+            f.write("-"*80 + "\n")
+            with open(input.pre_stats, 'r') as pre:
+                f.write(pre.read())
+            f.write("\n")
+            
+            # Hybrid assembly basic stats
+            f.write("\nHYBRID ASSEMBLY (READ-SUPPORTED MERGE) STATISTICS\n")
+            f.write("-"*80 + "\n")
+            
+            # Run seqkit stats
+            result = subprocess.run(
+                ['seqkit', 'stats', input.hybrid],
+                capture_output=True,
+                text=True
+            )
+            f.write(result.stdout)
+            f.write("\n")
+            
+            # Merge decisions summary
+            f.write("\nMERGE DECISIONS SUMMARY\n")
+            f.write("-"*80 + "\n")
+            
+            try:
+                merge_df = pd.read_csv(input.merge_decisions, sep='\t')
+                
+                if not merge_df.empty:
+                    f.write(f"Total decisions made: {len(merge_df)}\n\n")
+                    f.write("Decisions by category:\n")
+                    category_counts = merge_df['decision_category'].value_counts()
+                    for cat, count in category_counts.items():
+                        f.write(f"  {cat}: {count}\n")
+                    f.write("\n")
+                    
+                    # Show some example decisions
+                    f.write("Example merge decisions:\n")
+                    examples = merge_df[merge_df['decision_category'] != 'singleton'].head(5)
+                    for _, row in examples.iterrows():
+                        f.write(f"\n  Kept: {row['contig_kept']}\n")
+                        f.write(f"  Discarded: {row['contig_discarded']}\n")
+                        f.write(f"  Reason: {row['reason']}\n")
+                else:
+                    f.write("No merge decisions recorded.\n\n")
+            except:
+                f.write("No merge decision data available.\n\n")
+            
+            # Community composition
+            f.write("\nCOMMUNITY COMPOSITION (from BLAST re-mapping)\n")
+            f.write("-"*80 + "\n")
+            
+            try:
+                community_df = pd.read_csv(input.community_summary, sep='\t')
+                
+                if not community_df.empty:
+                    f.write(f"Total viruses detected: {len(community_df)}\n\n")
+                    f.write(community_df.to_string(index=False))
+                    f.write("\n\n")
+                else:
+                    f.write("No viruses detected in hybrid assembly.\n\n")
+            except:
+                f.write("No community data available.\n\n")
+            
+            # Per-contig identity summary
+            f.write("\nPER-CONTIG IDENTITY SUMMARY\n")
+            f.write("-"*80 + "\n")
+            
+            try:
+                per_contig_df = pd.read_csv(input.per_contig, sep='\t')
+                
+                if not per_contig_df.empty:
+                    f.write(f"Total contigs: {len(per_contig_df)}\n")
+                    f.write(f"Average identity: {per_contig_df['percent_identity'].mean():.2f}%\n")
+                    f.write(f"Median identity: {per_contig_df['percent_identity'].median():.2f}%\n")
+                    f.write(f"Min identity: {per_contig_df['percent_identity'].min():.2f}%\n")
+                    f.write(f"Max identity: {per_contig_df['percent_identity'].max():.2f}%\n")
+                    f.write(f"Average coverage: {per_contig_df['query_coverage'].mean():.2f}%\n\n")
+                    
+                    # Show top 10 contigs by identity
+                    f.write("Top 10 contigs by percent identity:\n")
+                    top_contigs = per_contig_df.nlargest(10, 'percent_identity')[
+                        ['contig_id', 'virus_name', 'segment', 'percent_identity', 'query_coverage', 'contig_length']
+                    ]
+                    f.write(top_contigs.to_string(index=False))
+                    f.write("\n")
+                else:
+                    f.write("No contig data available.\n")
+            except:
+                f.write("No per-contig data available.\n")
+            
+            f.write("\n" + "="*80 + "\n")
+```

@@ -1,0 +1,5 @@
+Sample_ID	forward_read	reverse_read	read_compression	category
+DSVHGN	/data/service/Pools/EsViritu/p2026/MergedFastqs/DSVHGN/AGCAAGACAG-AAGAAGATCC_1_sequence.txt.bz2	/data/service/Pools/EsViritu/p2026/MergedFastqs/DSVHGN/AGCAAGACAG-AAGAAGATCC_2_sequence.txt.bz2	bz2	sample
+ZAQGLL	/data/service/Pools/EsViritu/p2026/MergedFastqs/ZAQGLL/CCGGAACGAA-CTACACTATG_1_sequence.txt.bz2	/data/service/Pools/EsViritu/p2026/MergedFastqs/ZAQGLL/CCGGAACGAA-CTACACTATG_2_sequence.txt.bz2	bz2	sample
+CMMR_Non-Hybridized_Control	/data/service/Pools/EsViritu/p2026/MergedFastqs/CMMR_Non-Hybridized_Control/TAGGTTGGAA-TCTAGGAACA_1_sequence.txt.bz2	/data/service/Pools/EsViritu/p2026/MergedFastqs/CMMR_Non-Hybridized_Control/TAGGTTGGAA-TCTAGGAACA_2_sequence.txt.bz2	bz2	control
+CMMR_Hybridized_Control	/data/service/Pools/EsViritu/p2026/MergedFastqs/CMMR_Hybridized_Control/CATATGACGG-TCTGTGACAT_1_sequence.txt.bz2	/data/service/Pools/EsViritu/p2026/MergedFastqs/CMMR_Hybridized_Control/CATATGACGG-TCTGTGACAT_2_sequence.txt.bz2	bz2	control

@@ -1,0 +1,142 @@
+# =============================================================================
+# Snakemake Pipeline Configuration
+# Hybrid capture virome sequencing: Preprocessing, EsViritu, and optional hybrid assembly
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Required inputs
+# -----------------------------------------------------------------------------
+# Pool identifier - used for naming output directories and summary files
+pool_id: "p1389"
+
+# Path to sample sheet (TSV with columns: Sample_ID, forward_read, reverse_read, read_compression, category)
+sample_sheet: "/data/projects/ssimar/projects/VirMap_EsViritu_comparison/RSV/p1389/p1389_sample_sheet.tsv"
+
+# Path to EsViritu database directory
+# This directory should contain:
+#   - Reference FASTA file (*.fasta, *.fa, or *.fna)
+#   - virus_pathogen_database.all_metadata.tsv
+esviritu_db: "/data/projects/ssimar/db/RSV_NCBI_DB2"
+# esviritu_db: "/biolib/prod/db/esviritu_DBs/v3.2.4"
+# esviritu_db: "/data/projects/ssimar/db/NoV_NCBI"
+
+# Path to vector sequences for read removal
+vector_fasta: "/data/prod/db/vector_dbs/nihcqv_hiv1/vector_seqs.fna"
+
+# Path to human host filter sequences
+host_fasta: "/biolib/prod/db/chm13v2phix/chm13v2phix.fa"
+
+# -----------------------------------------------------------------------------
+# Output directories
+# -----------------------------------------------------------------------------
+# Root output directory - all pipeline outputs will be placed here
+output_root: "/data/projects/ssimar/projects/VirMap_EsViritu_comparison/RSV/p1389/EsViritu_results"
+
+# -----------------------------------------------------------------------------
+# Resource allocation - Preprocessing
+# -----------------------------------------------------------------------------
+# Threads for decompression (pigz/pbzip2)
+decompress_threads: 4
+
+# Threads for fastp quality filtering
+fastp_threads: 8
+
+# Threads for vector read removal
+vrr_threads: 4
+
+# Threads for host removal
+host_threads: 8
+
+# Threads for EsViritu
+esviritu_threads: 8
+
+# Memory allocation (in MB)
+decompress_mem_mb: 4000
+fastp_mem_mb: 8000
+vrr_mem_mb: 4000
+host_mem_mb: 8000
+esviritu_mem_mb: 8000
+
+# -----------------------------------------------------------------------------
+# Resource allocation - Hybrid Assembly
+# -----------------------------------------------------------------------------
+# Threads for metaviralSPADES
+metaviralspades_threads: 16
+
+# Memory for metaviralSPADES (in MB)
+metaviralspades_mem_mb: 64000
+
+# Threads for CheckV
+checkv_threads: 16
+
+# Memory for CheckV (in MB)
+checkv_mem_mb: 16000
+
+# Threads for minimap2 (assembly merging)
+MERGE_THREADS: 4
+
+# Memory for minimap2 (in MB)
+MERGE_MEM_MB: 16000
+
+# -----------------------------------------------------------------------------
+# Hybrid Assembly Parameters
+# -----------------------------------------------------------------------------
+# Path to CheckV database
+# Download from: https://portal.nersc.gov/CheckV/
+# Only needed if run_checkv is enabled
+checkv_db: "/data/prod/db/checkv/v1.5"
+
+# Minimum contig length to keep from metaviralSPADES (bp)
+min_contig_length: 500
+
+# CheckV quality levels to retain
+# Options: Complete, High-quality, Medium-quality, Low-quality, Not-determined
+checkv_quality:
+  - "Complete"
+  - "High-quality"
+  - "Medium-quality"
+
+# Minimap2 merging parameters
+MERGE_MIN_OVERLAP: 500
+MERGE_MIN_IDENTITY: 95
+
+# -----------------------------------------------------------------------------
+# Pipeline Stages - Set to true/false to control execution
+# -----------------------------------------------------------------------------
+# BASIC WORKFLOW (EsViritu only):
+# Set: run_qc=true, run_esviritu=true, all others=false
+
+# HYBRID ASSEMBLY WORKFLOW:
+# Phase 1 (examine assemblies): run_qc=true, run_esviritu=true, 
+#                                run_metaviralspades=true, run_checkv=true, 
+#                                run_pre_merge=true, run_hybrid=false
+# Phase 2 (create hybrid):      run_hybrid=true (leave others as-is)
+
+# Run quality control (decompression, fastp, dedup, vector removal, host removal)
+run_qc: true
+
+# Deprecated - kept for backwards compatibility (always runs if run_esviritu or run_metaviralspades is true)
+run_assemblies: true
+
+# Run EsViritu for reference-guided assembly
+run_esviritu: true
+
+# Run metaviralSPADES for de novo viral assembly
+run_metaviralspades: true
+
+# Run CheckV quality filtering on metaviralSPADES contigs
+# Requires: run_metaviralspades=true
+run_checkv: true
+
+# Run pre-merge steps (renaming contigs with virus/segment info, stats generation)
+# Requires: run_metaviralspades=true, run_checkv=true, run_esviritu=true
+run_pre_merge: true
+
+# Run hybrid assembly with minimap2 and community classification
+# Requires: run_pre_merge=true
+# Outputs: 
+#   - Hybrid assembly FASTA
+#   - Community composition summary (per virus/segment)
+#   - Per-contig identity to references
+#   - Comprehensive assembly statistics
+run_hybrid: true

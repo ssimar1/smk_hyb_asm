@@ -1,0 +1,11 @@
+name: esviritu_postproc
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - pbzip2
+  - samtools
+  - seqkit
+  - parallel
+  - perl=5.32.1
+  - htslib=1.23
