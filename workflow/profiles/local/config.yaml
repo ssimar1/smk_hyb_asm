@@ -1,0 +1,8 @@
+# Snakemake local profile configuration
+# Usage: snakemake --profile workflow/profiles/local
+
+cores: 8
+use-conda: True
+printshellcmds: True
+keep-going: True
+rerun-incomplete: True

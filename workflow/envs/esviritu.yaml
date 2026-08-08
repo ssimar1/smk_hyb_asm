@@ -1,0 +1,23 @@
+name: hyb_asm_virome_esviritu
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - polars
+  - pysam
+  - numpy
+  - pyyaml
+  - minimap2>=2.25
+  - samtools>=1.15
+  - fastp>=0.23.2
+  - seqkit
+  - r-base
+  - r-htmltools
+  - r-scales
+  - r-reactable
+  - r-reactablefmtr
+  - r-magrittr
+  - r-remotes
+  - pip
+  - esviritu=1.1.6

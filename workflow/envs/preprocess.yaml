@@ -1,0 +1,19 @@
+name: hyb_asm_virome_preprocess
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pigz
+  - lbzip2
+  - pbzip2
+  - fastp>=0.23.2
+  - minimap2>=2.25
+  - seqkit
+  - samtools
+  - polars
+  - fastexcel
+  - pysam
+  - pip
+  - pip:
+    - "git+https://github.com/mtisza1/vector_read_removal.git@v0.1.1"
