@@ -9,6 +9,7 @@ Version: 0.2.0
 __version__ = "0.2.0"
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -268,7 +269,7 @@ localrules:
 # Wildcard constraints
 # =============================================================================
 wildcard_constraints:
-    unique_id="|".join(UNIQUE_IDS),
+    unique_id="|".join(re.escape(uid) for uid in UNIQUE_IDS),
     category="sample|control",
 
 
@@ -520,6 +521,7 @@ rule esviritu:
         db=ESVIRITU_DB,
         out_dir=lambda wc: str(ESVIRITU_ROOT / wc.category / wc.unique_id),
         sample_name=lambda wc: wc.unique_id,
+        temp_dir=lambda wc: str(ESVIRITU_ROOT / wc.category / f"esviritu_{POOL_ID}" / f"{wc.unique_id}_temp"),
     shell:
         """
         (
@@ -647,7 +649,7 @@ rule metaviralspades:
     log:
         str(OUTPUT_ROOT / "logs" / "metaviralspades" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     threads: METAVIRALSPADES_THREADS
     resources:
         mem_mb=METAVIRALSPADES_MEM_MB,
@@ -684,7 +686,7 @@ rule filter_metaviral:
     log:
         str(OUTPUT_ROOT / "logs" / "filter_metaviral" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     params:
         minlen=MIN_CONTIG_LENGTH,
     shell:
@@ -708,7 +710,7 @@ rule checkv:
     log:
         str(OUTPUT_ROOT / "logs" / "checkv" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     threads: CHECKV_THREADS
     resources:
         mem_mb=CHECKV_MEM_MB,
@@ -741,7 +743,7 @@ rule extract_quality_contigs:
     log:
         str(OUTPUT_ROOT / "logs" / "extract_quality" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     params:
         quality_levels=CHECKV_QUALITY,
     run:
@@ -774,7 +776,7 @@ rule rename_metaviral:
     log:
         str(OUTPUT_ROOT / "logs" / "rename_metaviral" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     shell:
         """
         (
@@ -793,7 +795,7 @@ rule rename_esviritu_with_segments:
     log:
         str(OUTPUT_ROOT / "logs" / "rename_esviritu" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     params:
         db_dir=ESVIRITU_DB,
     run:
@@ -882,13 +884,13 @@ rule pre_merge_stats:
     """Generate assembly statistics before merging."""
     input:
         metaviral=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
-        esviritu=str(HYBRID_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "renamed" / "esviritu_renamed.fasta"),
+        esviritu=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "esviritu_renamed.fasta"),
     output:
         str(HYBRID_ROOT / "{category}" / "{unique_id}" / "stats" / "{unique_id}_pre_merge_stats.txt"),
     log:
         str(OUTPUT_ROOT / "logs" / "pre_merge_stats" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     shell:
         """
         (
@@ -966,7 +968,7 @@ rule classify_hybrid_community:
     log:
         str(OUTPUT_ROOT / "logs" / "classify_community" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/hyb_asm.yaml"
+        "envs/smk_hyb_asm.yaml"
     params:
         db_dir=ESVIRITU_DB,
     threads: 8
@@ -1119,4 +1121,3 @@ rule final_stats:
                 f.write("No per-contig data available.\n")
             
             f.write("\n" + "="*80 + "\n")
-```

@@ -73,10 +73,10 @@ checkv_threads: 16
 checkv_mem_mb: 16000
 
 # Threads for minimap2 (assembly merging)
-MERGE_THREADS: 4
+merge_threads: 4
 
 # Memory for minimap2 (in MB)
-MERGE_MEM_MB: 16000
+merge_mem_mb: 16000
 
 # -----------------------------------------------------------------------------
 # Hybrid Assembly Parameters
@@ -97,8 +97,8 @@ checkv_quality:
   - "Medium-quality"
 
 # Minimap2 merging parameters
-MERGE_MIN_OVERLAP: 500
-MERGE_MIN_IDENTITY: 95
+merge_min_overlap: 500
+merge_min_identity: 95
 
 # -----------------------------------------------------------------------------
 # Pipeline Stages - Set to true/false to control execution
