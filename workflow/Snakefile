@@ -662,7 +662,7 @@ rule spades:
         partition="cmmr",
     params:
         outdir=lambda wc: str(SPADES_ROOT / wc.category / wc.unique_id),
-        shell:
+    shell:
         """
         (
             echo "[$(date)] Running metaSPAdes for {wildcards.unique_id}"
