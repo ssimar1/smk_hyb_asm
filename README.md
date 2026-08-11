@@ -176,17 +176,17 @@ run_hybrid: false           # read-supported merge + RVDB classification
 
 ```bash
 # Dry run first — always
-snakemake --profile workflow/profiles/slurm -n
+snakemake --snakefile workflow/Snakefile --configfile config/config.yaml --profile workflow/profiles/slurm -n
 
 # Full run
-snakemake --profile workflow/profiles/slurm
+snakemake --snakefile workflow/Snakefile --configfile config/config.yaml --profile workflow/profiles/slurm
 
 # One sample only
-snakemake --profile workflow/profiles/slurm \
+snakemake --snakefile workflow/Snakefile --configfile config/config.yaml --profile workflow/profiles/slurm \
     results/hybrid_assembly/sample/SAMPLE_ID/hybrid/SAMPLE_ID_hybrid.fasta
 
 # Force a rule (e.g. after changing assembly settings)
-snakemake --profile workflow/profiles/slurm --forcerun metaviralspades
+snakemake --snakefile workflow/Snakefile --configfile config/config.yaml --profile workflow/profiles/slurm --forcerun metaviralspades
 ```
 
 ---
