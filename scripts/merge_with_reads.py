@@ -375,7 +375,7 @@ def main():
     )
     
     parser.add_argument('--assembly1', required=True, help='First assembly (e.g., EsViritu)')
-    parser.add_argument('--assembly2', required=True, help='Second assembly (e.g., metaviralSPADES)')
+    parser.add_argument('--assembly2', required=True, help='Second assembly (e.g., spades)')
     parser.add_argument('--reads1', required=True, help='Forward reads (FASTQ)')
     parser.add_argument('--reads2', required=True, help='Reverse reads (FASTQ)')
     parser.add_argument('--output', required=True, help='Output merged assembly FASTA')

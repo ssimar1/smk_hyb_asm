@@ -1,7 +1,7 @@
 """
 Snakemake pipeline for hybrid capture virome sequencing analysis.
 Decompresses reads, runs EsViritu for viral detection, and optionally runs
-metaviralSPADES for hybrid assembly.
+spades for hybrid assembly.
 
 Version: 0.2.0
 """
@@ -40,7 +40,7 @@ ESVIRITU_ROOT = OUTPUT_ROOT / "esviritu"
 VIRUS_READS_ROOT = OUTPUT_ROOT / "virus_reads"
 
 # New: Hybrid assembly output directories
-METAVIRALSPADES_ROOT = OUTPUT_ROOT / "metaviralspades"
+SPADES_ROOT = OUTPUT_ROOT / "spades"
 HYBRID_ROOT = OUTPUT_ROOT / "hybrid_assembly"
 
 DECOMPRESS_THREADS = config.get("decompress_threads", 4)
@@ -56,8 +56,8 @@ HOST_MEM_MB = config.get("host_mem_mb", 8000)
 ESVIRITU_MEM_MB = config.get("esviritu_mem_mb", 8000)
 
 # New: Hybrid assembly resource allocation
-METAVIRALSPADES_THREADS = config.get("metaviralspades_threads", 16)
-METAVIRALSPADES_MEM_MB = config.get("metaviralspades_mem_mb", 64000)
+SPADES_THREADS = config.get("spades_threads", 16)
+SPADES_MEM_MB = config.get("spades_mem_mb", 64000)
 CHECKV_THREADS = config.get("checkv_threads", 16)
 CHECKV_MEM_MB = config.get("checkv_mem_mb", 16000)
 MERGE_THREADS = config.get("merge_threads", 4)
@@ -81,7 +81,7 @@ RVDB_MIN_COVERAGE = config.get("rvdb_min_coverage", 50)
 RUN_QC = config.get("run_qc", True)
 RUN_ASSEMBLIES = config.get("run_assemblies", True)
 RUN_ESVIRITU = config.get("run_esviritu", True)
-RUN_METAVIRALSPADES = config.get("run_metaviralspades", False)
+RUN_SPADES = config.get("run_spades", False)
 RUN_CHECKV = config.get("run_checkv", False)
 RUN_PRE_MERGE = config.get("run_pre_merge", False)
 RUN_HYBRID = config.get("run_hybrid", False)
@@ -168,10 +168,10 @@ def get_all_inputs(wildcards):
             category=CATEGORIES,
         ))
 
-    if RUN_METAVIRALSPADES:
-        # metaviralSPADES outputs
+    if RUN_SPADES:
+        # spades outputs
         inputs.extend(expand(
-            str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
+            str(SPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
             zip,
             unique_id=UNIQUE_IDS,
             category=SAMPLES["category"].tolist(),
@@ -180,13 +180,13 @@ def get_all_inputs(wildcards):
     if RUN_CHECKV:
         # CheckV outputs
         inputs.extend(expand(
-            str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
+            str(SPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
             zip,
             unique_id=UNIQUE_IDS,
             category=SAMPLES["category"].tolist(),
         ))
         inputs.extend(expand(
-            str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
+            str(SPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
             zip,
             unique_id=UNIQUE_IDS,
             category=SAMPLES["category"].tolist(),
@@ -642,39 +642,39 @@ rule summarize_esviritu:
 
 
 # =============================================================================
-# Module: Hybrid Assembly - metaviralSPADES
+# Module: Hybrid Assembly - spades
 # =============================================================================
-rule metaviralspades:
-    """Run metaviralSPADES for de novo viral assembly."""
+rule spades:
+    """Run spades for de novo viral assembly."""
     input:
         r1=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R1.fastq"),
         r2=str(TEMP_ROOT / "{category}" / "05_host_removed" / "{unique_id}.R2.fastq"),
     output:
-        contigs=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
-        scaffolds=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "scaffolds.fasta"),
+        contigs=str(SPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
+        scaffolds=str(SPADES_ROOT / "{category}" / "{unique_id}" / "scaffolds.fasta"),
     log:
-        str(OUTPUT_ROOT / "logs" / "metaviralspades" / "{category}" / "{unique_id}.log"),
+        str(OUTPUT_ROOT / "logs" / "spades" / "{category}" / "{unique_id}.log"),
     conda:
         "envs/hyb_asm.yaml"
-    threads: METAVIRALSPADES_THREADS
+    threads: SPADES_THREADS
     resources:
-        mem_mb=METAVIRALSPADES_MEM_MB,
+        mem_mb=SPADES_MEM_MB,
         partition="cmmr",
     params:
-        outdir=lambda wc: str(METAVIRALSPADES_ROOT / wc.category / wc.unique_id),
-    shell:
+        outdir=lambda wc: str(SPADES_ROOT / wc.category / wc.unique_id),
+        shell:
         """
         (
-            echo "[$(date)] Running metaviralSPADES for {wildcards.unique_id}"
+            echo "[$(date)] Running metaSPAdes for {wildcards.unique_id}"
 
-            # SPAdes refuses to run into a non-empty directory. On a rerun,
-            # wipe any partial output so we always start clean.
+            # SPAdes refuses a non-empty output dir; wipe on rerun.
             rm -rf {params.outdir}
 
-            metaviralspades.py \
+            spades.py --isolate \
                 -1 {input.r1} \
                 -2 {input.r2} \
                 -o {params.outdir} \
+                -k 21,33,55,77 \
                 -t {threads} \
                 -m $(({resources.mem_mb} / 1024)) \
                 2>&1
@@ -688,11 +688,11 @@ rule metaviralspades:
 # Module: Hybrid Assembly - Quality Filtering
 # =============================================================================
 rule filter_metaviral:
-    """Filter short contigs from metaviralSPADES output."""
+    """Filter short contigs from spades output."""
     input:
-        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
+        str(SPADES_ROOT / "{category}" / "{unique_id}" / "contigs.fasta"),
     output:
-        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
+        str(SPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
     log:
         str(OUTPUT_ROOT / "logs" / "filter_metaviral" / "{category}" / "{unique_id}.log"),
     conda:
@@ -710,13 +710,13 @@ rule filter_metaviral:
 
 
 rule checkv:
-    """Run CheckV quality assessment on metaviralSPADES contigs."""
+    """Run CheckV quality assessment on spades contigs."""
     input:
-        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
+        str(SPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
     output:
-        summary=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
-        completeness=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "completeness.tsv"),
-        contamination=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "contamination.tsv"),
+        summary=str(SPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
+        completeness=str(SPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "completeness.tsv"),
+        contamination=str(SPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "contamination.tsv"),
     log:
         str(OUTPUT_ROOT / "logs" / "checkv" / "{category}" / "{unique_id}.log"),
     conda:
@@ -726,7 +726,7 @@ rule checkv:
         mem_mb=CHECKV_MEM_MB,
         partition="cmmr",
     params:
-        outdir=lambda wc: str(METAVIRALSPADES_ROOT / wc.category / wc.unique_id / "checkv"),
+        outdir=lambda wc: str(SPADES_ROOT / wc.category / wc.unique_id / "checkv"),
         db=CHECKV_DB,
     shell:
         """
@@ -745,11 +745,11 @@ rule checkv:
 rule extract_quality_contigs:
     """Extract high-quality contigs based on CheckV results."""
     input:
-        fasta=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
-        summary=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
+        fasta=str(SPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_filtered.fasta"),
+        summary=str(SPADES_ROOT / "{category}" / "{unique_id}" / "checkv" / "quality_summary.tsv"),
     output:
-        ids=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "good_contigs.txt"),
-        fasta=str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
+        ids=str(SPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "good_contigs.txt"),
+        fasta=str(SPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
     log:
         str(OUTPUT_ROOT / "logs" / "extract_quality" / "{category}" / "{unique_id}.log"),
     conda:
@@ -778,9 +778,9 @@ rule extract_quality_contigs:
 # Module: Hybrid Assembly - Prepare for Merging
 # =============================================================================
 rule rename_metaviral:
-    """Rename metaviralSPADES contigs to track origin."""
+    """Rename spades contigs to track origin."""
     input:
-        str(METAVIRALSPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
+        str(SPADES_ROOT / "{category}" / "{unique_id}" / "filtered" / "metaviral_clean.fasta"),
     output:
         str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
     log:
@@ -790,7 +790,7 @@ rule rename_metaviral:
     shell:
         """
         (
-            echo "[$(date)] Renaming metaviralSPADES contigs for {wildcards.unique_id}"
+            echo "[$(date)] Renaming spades contigs for {wildcards.unique_id}"
             seqkit replace -p '(.+)' -r 'metaviral_{{nr}}' {input} > {output}
             echo "[$(date)] Done"
         ) &> {log}
@@ -907,7 +907,7 @@ rule pre_merge_stats:
             echo "Pre-merge assembly statistics for {wildcards.unique_id}" > {output}
             echo "========================================" >> {output}
             echo "" >> {output}
-            echo "MetaviralSPADES contigs:" >> {output}
+            echo "Spades contigs:" >> {output}
             seqkit stats {input.metaviral} >> {output}
             echo "" >> {output}
             echo "EsViritu contigs:" >> {output}

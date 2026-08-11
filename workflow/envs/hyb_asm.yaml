@@ -5,7 +5,7 @@ channels:
   - defaults
 dependencies:
   # Assembly tools
-  - spades >=3.15  # includes metaviralSPADES
+  - spades >=3.15  # includes spades
   - checkv >=1.0
 
   # Sequence manipulation

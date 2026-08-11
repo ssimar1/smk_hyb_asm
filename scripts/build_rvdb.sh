@@ -19,6 +19,9 @@
 
 set -euo pipefail
 
+#conda init bash
+#conda activate smk_hyb_asm
+
 # --- Edit these to match your paths ---
 RVDB_DIR="/data/projects/ssimar/db/RVDB"
 NUCL_FASTA="${RVDB_DIR}/C-RVDBv32.0.fasta"

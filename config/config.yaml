@@ -67,11 +67,11 @@ esviritu_mem_mb: 8000
 # -----------------------------------------------------------------------------
 # Resource allocation - Hybrid Assembly
 # -----------------------------------------------------------------------------
-# Threads for metaviralSPADES
-metaviralspades_threads: 16
+# Threads for spades
+spades_threads: 16
 
-# Memory for metaviralSPADES (in MB)
-metaviralspades_mem_mb: 64000
+# Memory for spades (in MB)
+spades_mem_mb: 64000
 
 # Threads for CheckV
 checkv_threads: 16
@@ -93,7 +93,7 @@ merge_mem_mb: 16000
 # Only needed if run_checkv is enabled
 checkv_db: "/data/prod/db/checkv/v1.5"
 
-# Minimum contig length to keep from metaviralSPADES (bp)
+# Minimum contig length to keep from spades (bp)
 min_contig_length: 500
 
 # CheckV quality levels to retain
@@ -115,28 +115,28 @@ merge_min_identity: 95
 
 # HYBRID ASSEMBLY WORKFLOW:
 # Phase 1 (examine assemblies): run_qc=true, run_esviritu=true, 
-#                                run_metaviralspades=true, run_checkv=true, 
+#                                run_spades=true, run_checkv=true, 
 #                                run_pre_merge=true, run_hybrid=false
 # Phase 2 (create hybrid):      run_hybrid=true (leave others as-is)
 
 # Run quality control (decompression, fastp, dedup, vector removal, host removal)
 run_qc: true
 
-# Deprecated - kept for backwards compatibility (always runs if run_esviritu or run_metaviralspades is true)
+# Deprecated - kept for backwards compatibility (always runs if run_esviritu or run_spades is true)
 run_assemblies: true
 
 # Run EsViritu for reference-guided assembly
 run_esviritu: true
 
-# Run metaviralSPADES for de novo viral assembly
-run_metaviralspades: true
+# Run spades for de novo viral assembly
+run_spades: true
 
-# Run CheckV quality filtering on metaviralSPADES contigs
-# Requires: run_metaviralspades=true
+# Run CheckV quality filtering on spades contigs
+# Requires: run_spades=true
 run_checkv: true
 
 # Run pre-merge steps (renaming contigs with virus/segment info, stats generation)
-# Requires: run_metaviralspades=true, run_checkv=true, run_esviritu=true
+# Requires: run_spades=true, run_checkv=true, run_esviritu=true
 run_pre_merge: true
 
 # Run hybrid assembly with minimap2 and community classification
