@@ -1,7 +1,7 @@
 """
 Snakemake pipeline for hybrid capture virome sequencing analysis.
 Decompresses reads, runs EsViritu for viral detection, and optionally runs
-metaviralSPADES + minimus2 for hybrid assembly.
+metaviralSPADES for hybrid assembly.
 
 Version: 0.2.0
 """
@@ -70,6 +70,13 @@ CHECKV_DB = config.get("checkv_db", "/data/prod/db/checkv/v1.5")
 MIN_CONTIG_LENGTH = config.get("min_contig_length", 500)
 CHECKV_QUALITY = config.get("checkv_quality", ["Complete", "High-quality", "Medium-quality"])
 
+# New: RVDB tiered classification
+RVDB_NUCL_DB = config.get("rvdb_nucl_db")
+RVDB_PROT_DB = config.get("rvdb_prot_db")
+RVDB_TAXONOMY = config.get("rvdb_taxonomy")
+RVDB_MIN_IDENTITY = config.get("rvdb_min_identity", 90)
+RVDB_MIN_COVERAGE = config.get("rvdb_min_coverage", 50)
+
 # Pipeline stage flags
 RUN_QC = config.get("run_qc", True)
 RUN_ASSEMBLIES = config.get("run_assemblies", True)
@@ -90,7 +97,7 @@ def load_sample_sheet(path):
     missing = set(required_cols) - set(df.columns)
     if missing:
         sys.exit(f"[ERROR] Sample sheet missing required columns: {missing}")
-    
+
     # Because I'm lazy-- instead of changing all the unique id info, just copy sample_id to unique_id in the df (I don't need pool IDs for my data, at least right now)
     df["unique_id"] = df["Sample_ID"]
     return df
@@ -146,7 +153,7 @@ def get_esviritu_outputs_for_category(wildcards):
 def get_all_inputs(wildcards):
     """Build list of target files based on pipeline stage flags."""
     inputs = []
-    
+
     if RUN_ESVIRITU:
         # EsViritu outputs
         inputs.extend(expand(
@@ -160,7 +167,7 @@ def get_all_inputs(wildcards):
             str(ESVIRITU_ROOT / "{category}" / f"esviritu_{POOL_ID}" / f"esviritu_{POOL_ID}.detected_virus.info.tsv"),
             category=CATEGORIES,
         ))
-    
+
     if RUN_METAVIRALSPADES:
         # metaviralSPADES outputs
         inputs.extend(expand(
@@ -169,7 +176,7 @@ def get_all_inputs(wildcards):
             unique_id=UNIQUE_IDS,
             category=SAMPLES["category"].tolist(),
         ))
-    
+
     if RUN_CHECKV:
         # CheckV outputs
         inputs.extend(expand(
@@ -184,7 +191,7 @@ def get_all_inputs(wildcards):
             unique_id=UNIQUE_IDS,
             category=SAMPLES["category"].tolist(),
         ))
-    
+
     if RUN_PRE_MERGE:
         # Renamed contigs and pre-merge stats
         inputs.extend(expand(
@@ -205,7 +212,7 @@ def get_all_inputs(wildcards):
             unique_id=UNIQUE_IDS,
             category=SAMPLES["category"].tolist(),
         ))
-    
+
     if RUN_HYBRID:
         # Hybrid assembly outputs
         inputs.extend(expand(
@@ -240,7 +247,7 @@ def get_all_inputs(wildcards):
             unique_id=UNIQUE_IDS,
             category=SAMPLES["category"].tolist(),
         ))
-    
+
     return inputs
 
 
@@ -306,7 +313,7 @@ rule decompress_reads:
                 echo "ERROR: Unknown compression type: {params.compression}" >&2
                 exit 1
             fi
-            
+
             echo "[$(date)] Decompressing R2: {input.r2}"
             if [ "{params.compression}" == "gz" ]; then
                 timeout 600s pigz -dc -p {threads} < {input.r2} > {output.r2}
@@ -316,7 +323,7 @@ rule decompress_reads:
                 echo "ERROR: Unknown compression type: {params.compression}" >&2
                 exit 1
             fi
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -347,7 +354,7 @@ rule fastp_qc:
         """
         (
             echo "[$(date)] Running fastp for {wildcards.unique_id}"
-            
+
             fastp \
                 --in1 {input.r1} \
                 --in2 {input.r2} \
@@ -356,7 +363,7 @@ rule fastp_qc:
                 --html {output.html} \
                 --json {output.json} \
                 --thread {threads}
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -387,7 +394,7 @@ rule fastp_dedup:
         """
         (
             echo "[$(date)] Running fastp deduplication for {wildcards.unique_id}"
-            
+
             fastp \
                 --dedup \
                 --disable_trim_poly_g \
@@ -402,7 +409,7 @@ rule fastp_dedup:
                 --json {output.json} \
                 --report_title {wildcards.unique_id} \
                 --thread {threads}
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -434,7 +441,7 @@ rule vector_read_removal:
         """
         (
             echo "[$(date)] Running vector read removal for {wildcards.unique_id}"
-            
+
             vrr \
                 -1 {input.r1} \
                 -2 {input.r2} \
@@ -442,13 +449,13 @@ rule vector_read_removal:
                 -o {params.out_prefix} \
                 -t {threads} \
                 --nm-threshold 4
-            
+
             # vrr outputs as <prefix>_R1.fastq and <prefix>_R2.fastq
             # Rename to match expected output pattern (R1/R2 use dot, vrr uses underscore)
             mv {params.out_prefix}_R1.fastq {output.r1}
             mv {params.out_prefix}_R2.fastq {output.r2}
             # CSV is already in correct location (no rename needed)
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -477,7 +484,7 @@ rule host_removal:
         """
         (
             echo "[$(date)] Running host read removal for {wildcards.unique_id}"
-            
+
             minimap2 -t {threads} -ax sr -K 500M {input.ref} \
                 {input.r1} \
                 {input.r2} \
@@ -487,7 +494,7 @@ rule host_removal:
             samtools fastq -f 12 \
                 -1 {output.r1} \
                 -2 {output.r2} -
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -518,13 +525,14 @@ rule esviritu:
         partition="cmmr",
     params:
         db=ESVIRITU_DB,
-        out_dir=lambda wc: str(ESVIRITU_ROOT / wc.category / wc.unique_id),
+        out_dir=lambda wc: str(ESVIRITU_ROOT / wc.category / f"esviritu_{POOL_ID}"),
         sample_name=lambda wc: wc.unique_id,
+        temp_dir=lambda wc: str(ESVIRITU_ROOT / wc.category / f"esviritu_{POOL_ID}" / f"{wc.unique_id}_temp"),
     shell:
         """
         (
             echo "[$(date)] Running EsViritu for {wildcards.unique_id}"
-            
+
             EsViritu \
                 -r {input.r1} {input.r2} \
                 -s {params.sample_name} \
@@ -533,9 +541,9 @@ rule esviritu:
                 -q F \
                 --keep T \
                 -t {threads} || true
-            
+
             echo "[$(date)] Checking for expected output files..."
-            
+
             # Create dummy output files if EsViritu didn't produce them
             # (e.g., negative controls or samples with no viral hits)
             if [ ! -f "{output.info}" ]; then
@@ -563,17 +571,17 @@ rule esviritu:
             if [ -d "{params.temp_dir}" ]; then
                 TEMP_SIZE_BEFORE=$(du -sh "{params.temp_dir}" | cut -f1)
                 echo "[$(date)] Temp directory size before cleanup: $TEMP_SIZE_BEFORE"
-                
+
                 # Compress BAM file if it exists and is not empty
                 if [ -s "{output.bam}" ]; then
                     # Compress with samtools (creates .bam.gz)
                     samtools view -@ {threads} -b -h "{output.bam}" | \
                         gzip -c > "{output.bam}.gz"
-                    
+
                     # Remove original uncompressed BAM and index
                     rm -f "{output.bam}" "{output.bam}.bai"
                 fi
-                
+
                 # Delete all other files in temp directory (keeps only .bam.gz)
                 echo "[$(date)] Removing other temp files..."
                 find "{params.temp_dir}" -type f \
@@ -582,7 +590,7 @@ rule esviritu:
             else
                 echo "[$(date)] No temp directory found to clean up"
             fi
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -605,16 +613,16 @@ rule summarize_esviritu:
     conda:
         "envs/esviritu.yaml"
     params:
-        esv_dir=lambda wc: str(ESVIRITU_ROOT / wc.category),
+        esv_dir=lambda wc: str(ESVIRITU_ROOT / wc.category / f"esviritu_{POOL_ID}"),
         basename=f"esviritu_{POOL_ID}",
     shell:
         """
         (
             echo "[$(date)] Summarizing EsViritu runs for {wildcards.category}"
-            
+
             # Run summarize_esv_runs (outputs to current working directory)
             summarize_esv_runs {params.esv_dir} || true
-            
+
             # Move generated files to the correct directory
             for suffix in .detected_virus.info.tsv .detected_virus.assembly_summary.tsv .tax_profile.tsv _EsViritu_project_reactable.html .virus_coverage_windows.tsv; do
                 src="{params.basename}${{suffix}}"
@@ -627,7 +635,7 @@ rule summarize_esviritu:
                     touch "$dest"
                 fi
             done
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -658,7 +666,11 @@ rule metaviralspades:
         """
         (
             echo "[$(date)] Running metaviralSPADES for {wildcards.unique_id}"
-            
+
+            # SPAdes refuses to run into a non-empty directory. On a rerun,
+            # wipe any partial output so we always start clean.
+            rm -rf {params.outdir}
+
             metaviralspades.py \
                 -1 {input.r1} \
                 -2 {input.r2} \
@@ -666,7 +678,7 @@ rule metaviralspades:
                 -t {threads} \
                 -m $(({resources.mem_mb} / 1024)) \
                 2>&1
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -720,11 +732,11 @@ rule checkv:
         """
         (
             echo "[$(date)] Running CheckV for {wildcards.unique_id}"
-            
+
             checkv end_to_end {input} {params.outdir} \
                 -t {threads} \
                 -d {params.db}
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -746,18 +758,18 @@ rule extract_quality_contigs:
         quality_levels=CHECKV_QUALITY,
     run:
         import pandas as pd
-        
+
         # Read CheckV summary
         df = pd.read_csv(input.summary, sep='\t')
-        
+
         # Filter by quality
         quality_contigs = df[df['checkv_quality'].isin(params.quality_levels)]['contig_id'].tolist()
-        
+
         # Write IDs to file
         with open(output.ids, 'w') as f:
             for contig_id in quality_contigs:
                 f.write(f"{contig_id}\n")
-        
+
         # Extract sequences
         shell("seqkit grep -f {output.ids} {input.fasta} > {output.fasta} 2> {log}")
 
@@ -802,51 +814,51 @@ rule rename_esviritu_with_segments:
         from Bio.SeqRecord import SeqRecord
         import re
         from pathlib import Path
-        
+
         # Read metadata from EsViritu database
         metadata_file = Path(params.db_dir) / "virus_pathogen_database.all_metadata.tsv"
         metadata = pd.read_csv(metadata_file, sep='\t')
-        
+
         # Create accession to metadata mapping
         acc_to_info = {}
         for _, row in metadata.iterrows():
             acc = row['Accession']
-            
+
             # Get subspecies (more specific than species name)
             subspecies = row.get('subspecies', '')
             if pd.notna(subspecies) and subspecies != '""' and subspecies != '':
                 virus_name = subspecies.replace('t__', '').strip()
             else:
                 virus_name = row.get('Name', 'Unknown').strip()
-            
+
             # Clean virus name for use in ID
             virus_name_clean = virus_name.replace(' ', '_')
-            
+
             # Get segment
             segment = row.get('Segment', '')
             if pd.notna(segment) and segment != '""' and segment != '':
                 segment = str(segment).strip()
             else:
                 segment = None
-            
+
             acc_to_info[acc] = {
                 'virus_name': virus_name_clean,
                 'segment': segment,
             }
-        
+
         # Rename sequences
         output_records = []
-        
+
         for record in SeqIO.parse(input.fasta, 'fasta'):
             # Extract accession from header like "KC731482.1_consensus"
             match = re.match(r'^([A-Z0-9_]+\.\d+)', record.id)
-            
+
             if match:
                 acc = match.group(1)
-                
+
                 if acc in acc_to_info:
                     info = acc_to_info[acc]
-                    
+
                     # Build new ID
                     if info['segment']:
                         new_id = f"esviritu_{info['virus_name']}_seg{info['segment']}_{acc}"
@@ -858,14 +870,14 @@ rule rename_esviritu_with_segments:
             else:
                 # Couldn't parse accession
                 new_id = f"esviritu_{record.id}"
-            
+
             new_record = SeqRecord(
                 record.seq,
                 id=new_id,
                 description=""
             )
             output_records.append(new_record)
-        
+
         # Write output
         if output_records:
             SeqIO.write(output_records, output[0], 'fasta')
@@ -882,7 +894,7 @@ rule pre_merge_stats:
     """Generate assembly statistics before merging."""
     input:
         metaviral=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
-        esviritu=str(HYBRID_ROOT / "{category}" / f"esviritu_{POOL_ID}" / "renamed" / "esviritu_renamed.fasta"),
+        esviritu=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "esviritu_renamed.fasta"),
     output:
         str(HYBRID_ROOT / "{category}" / "{unique_id}" / "stats" / "{unique_id}_pre_merge_stats.txt"),
     log:
@@ -909,11 +921,11 @@ rule pre_merge_stats:
 rule merge_with_read_support:
     """
     Merge assemblies with read-based validation using clear decision rules.
-    
+
     Decision priority:
-    1. Coverage >2x different → choose higher coverage
-    2. Similar coverage but MAPQ >10 different → choose higher MAPQ
-    3. Similar quality but different length → choose longer
+    1. Coverage >2x different -> choose higher coverage
+    2. Similar coverage but MAPQ >10 different -> choose higher MAPQ
+    3. Similar quality but different length -> choose longer
     """
     input:
         metaviral=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "renamed" / "metaviral_renamed.fasta"),
@@ -926,7 +938,7 @@ rule merge_with_read_support:
     log:
         str(OUTPUT_ROOT / "logs" / "merge_read_support" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/smk_hyb_asm.yaml"
+        "envs/hyb_asm.yaml"
     threads: MERGE_THREADS  # Reuse same thread allocation
     resources:
         mem_mb=MERGE_MEM_MB,
@@ -939,7 +951,7 @@ rule merge_with_read_support:
         """
         (
             echo "[$(date)] Merging assemblies with read support for {wildcards.unique_id}"
-            
+
             python scripts/merge_with_reads.py \
                 --assembly1 {input.esviritu} \
                 --assembly2 {input.metaviral} \
@@ -951,16 +963,21 @@ rule merge_with_read_support:
                 --min-overlap {params.min_overlap} \
                 --min-identity {params.min_identity} \
                 --workdir {params.workdir}
-            
+
             echo "[$(date)] Done"
         ) &> {log}
         """
 
 rule classify_hybrid_community:
-    """Determine community structure by mapping hybrid contigs to reference database."""
+    """Two-tier RVDB classification: BLASTn all contigs against clustered
+    nucleotide RVDB, then BLASTx only the contigs that failed the confident-hit
+    threshold against protein RVDB, then annotate both against the RVDB
+    nucleotide taxonomy table."""
     input:
         hybrid=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "hybrid" / "{unique_id}_hybrid.fasta"),
     output:
+        nucl_blast=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_blast_nucl.tsv"),
+        prot_blast=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_blast_prot.tsv"),
         summary=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_community_summary.tsv"),
         per_contig=str(HYBRID_ROOT / "{category}" / "{unique_id}" / "community" / "{unique_id}_per_contig_identity.tsv"),
     log:
@@ -968,7 +985,12 @@ rule classify_hybrid_community:
     conda:
         "envs/hyb_asm.yaml"
     params:
-        db_dir=ESVIRITU_DB,
+        nucl_db=RVDB_NUCL_DB,
+        prot_db=RVDB_PROT_DB,
+        taxonomy=RVDB_TAXONOMY,
+        min_id=RVDB_MIN_IDENTITY,
+        min_cov=RVDB_MIN_COVERAGE,
+        workdir=lambda wc: str(HYBRID_ROOT / wc.category / wc.unique_id / "community" / "work"),
     threads: 8
     resources:
         mem_mb=8000,
@@ -976,31 +998,63 @@ rule classify_hybrid_community:
     shell:
         """
         (
-            echo "[$(date)] Classifying hybrid assembly community for {wildcards.unique_id}"
-            
-            # Find the reference fasta in the database directory
-            REF_FASTA=$(find {params.db_dir} -name "*.fasta" -o -name "*.fa" -o -name "*.fna" | head -n 1)
-            METADATA={params.db_dir}/virus_pathogen_database.all_metadata.tsv
-            
-            # BLAST hybrid contigs against reference database
+            echo "[$(date)] Tiered RVDB classification for {wildcards.unique_id}"
+            mkdir -p {params.workdir}
+
+            # Empty assembly -> write empty outputs and stop
+            if [ ! -s {input.hybrid} ]; then
+                echo "[$(date)] Empty hybrid assembly, writing empty outputs"
+                : > {output.nucl_blast}
+                : > {output.prot_blast}
+                echo -e "family\tspecies\tnum_contigs\tavg_identity\ttotal_length" > {output.summary}
+                echo -e "contig_id\ttier\taccession\tpercent_identity\tquery_coverage\tcontig_length\trealm\tkingdom\tphylum\tclass\torder\tfamily\tgenus\tspecies\tsubspecies" > {output.per_contig}
+                exit 0
+            fi
+
+            # Tier 1: BLASTn vs clustered nucleotide RVDB
             blastn \
                 -query {input.hybrid} \
-                -subject $REF_FASTA \
-                -outfmt "6 qseqid sseqid pident length qlen slen qcovs evalue bitscore" \
+                -db {params.nucl_db} \
+                -outfmt "6 qseqid sseqid pident length qlen slen qcovs evalue bitscore stitle" \
                 -max_target_seqs 1 \
                 -num_threads {threads} \
                 -evalue 1e-10 \
-                > {output.summary}.blast
-            
-            # Annotate with metadata
-            python scripts/annotate_community.py \
-                --blast {output.summary}.blast \
-                --metadata $METADATA \
+                > {output.nucl_blast}
+
+            # Select contigs that FAILED the confident nucleotide threshold
+            python scripts/select_nucl_misses.py \
+                --nucl-blast {output.nucl_blast} \
+                --hybrid-fasta {input.hybrid} \
+                --output-fasta {params.workdir}/misses.fasta \
+                --min-identity {params.min_id} \
+                --min-coverage {params.min_cov}
+
+            # Tier 2: BLASTx the misses vs protein RVDB
+            if [ -s {params.workdir}/misses.fasta ]; then
+                blastx \
+                    -query {params.workdir}/misses.fasta \
+                    -db {params.prot_db} \
+                    -outfmt "6 qseqid sseqid pident length qlen slen qcovs evalue bitscore stitle" \
+                    -max_target_seqs 1 \
+                    -num_threads {threads} \
+                    -evalue 1e-5 \
+                    > {output.prot_blast}
+            else
+                echo "[$(date)] No nucleotide misses; skipping protein tier"
+                : > {output.prot_blast}
+            fi
+
+            # Merge + annotate against taxonomy
+            python scripts/annotate_rvdb_tiered.py \
+                --nucl-blast {output.nucl_blast} \
+                --prot-blast {output.prot_blast} \
+                --taxonomy {params.taxonomy} \
+                --hybrid-fasta {input.hybrid} \
                 --output-summary {output.summary} \
-                --output-per-contig {output.per_contig}
-            
-            rm {output.summary}.blast
-            
+                --output-per-contig {output.per_contig} \
+                --min-identity {params.min_id} \
+                --min-coverage {params.min_cov}
+
             echo "[$(date)] Done"
         ) &> {log}
         """
@@ -1018,27 +1072,27 @@ rule final_stats:
     log:
         str(OUTPUT_ROOT / "logs" / "final_stats" / "{category}" / "{unique_id}.log"),
     conda:
-        "envs/smk_hyb_asm.yaml"
+        "envs/hyb_asm.yaml"
     run:
         import pandas as pd
         import subprocess
-        
+
         with open(output[0], 'w') as f:
             f.write("="*80 + "\n")
             f.write(f"FINAL HYBRID ASSEMBLY REPORT: {wildcards.unique_id}\n")
             f.write("="*80 + "\n\n")
-            
+
             # Pre-merge stats
             f.write("PRE-MERGE ASSEMBLY STATISTICS\n")
             f.write("-"*80 + "\n")
             with open(input.pre_stats, 'r') as pre:
                 f.write(pre.read())
             f.write("\n")
-            
+
             # Hybrid assembly basic stats
             f.write("\nHYBRID ASSEMBLY (READ-SUPPORTED MERGE) STATISTICS\n")
             f.write("-"*80 + "\n")
-            
+
             # Run seqkit stats
             result = subprocess.run(
                 ['seqkit', 'stats', input.hybrid],
@@ -1047,14 +1101,14 @@ rule final_stats:
             )
             f.write(result.stdout)
             f.write("\n")
-            
+
             # Merge decisions summary
             f.write("\nMERGE DECISIONS SUMMARY\n")
             f.write("-"*80 + "\n")
-            
+
             try:
                 merge_df = pd.read_csv(input.merge_decisions, sep='\t')
-                
+
                 if not merge_df.empty:
                     f.write(f"Total decisions made: {len(merge_df)}\n\n")
                     f.write("Decisions by category:\n")
@@ -1062,7 +1116,7 @@ rule final_stats:
                     for cat, count in category_counts.items():
                         f.write(f"  {cat}: {count}\n")
                     f.write("\n")
-                    
+
                     # Show some example decisions
                     f.write("Example merge decisions:\n")
                     examples = merge_df[merge_df['decision_category'] != 'singleton'].head(5)
@@ -1072,51 +1126,63 @@ rule final_stats:
                         f.write(f"  Reason: {row['reason']}\n")
                 else:
                     f.write("No merge decisions recorded.\n\n")
-            except:
+            except Exception:
                 f.write("No merge decision data available.\n\n")
-            
+
             # Community composition
-            f.write("\nCOMMUNITY COMPOSITION (from BLAST re-mapping)\n")
+            f.write("\nCOMMUNITY COMPOSITION (RVDB tiered classification)\n")
             f.write("-"*80 + "\n")
-            
+
             try:
                 community_df = pd.read_csv(input.community_summary, sep='\t')
-                
                 if not community_df.empty:
-                    f.write(f"Total viruses detected: {len(community_df)}\n\n")
+                    f.write(f"Total taxa detected (family/species groups): {len(community_df)}\n\n")
                     f.write(community_df.to_string(index=False))
                     f.write("\n\n")
                 else:
                     f.write("No viruses detected in hybrid assembly.\n\n")
-            except:
+            except Exception:
                 f.write("No community data available.\n\n")
-            
+
             # Per-contig identity summary
-            f.write("\nPER-CONTIG IDENTITY SUMMARY\n")
+            f.write("\nPER-CONTIG SUMMARY\n")
             f.write("-"*80 + "\n")
-            
+
             try:
                 per_contig_df = pd.read_csv(input.per_contig, sep='\t')
-                
                 if not per_contig_df.empty:
+                    # percent_identity / query_coverage can be "NA" for no-hit contigs
+                    pid = pd.to_numeric(per_contig_df['percent_identity'], errors='coerce')
+                    qcov = pd.to_numeric(per_contig_df['query_coverage'], errors='coerce')
+                    n_hits = int(pid.notna().sum())
+
                     f.write(f"Total contigs: {len(per_contig_df)}\n")
-                    f.write(f"Average identity: {per_contig_df['percent_identity'].mean():.2f}%\n")
-                    f.write(f"Median identity: {per_contig_df['percent_identity'].median():.2f}%\n")
-                    f.write(f"Min identity: {per_contig_df['percent_identity'].min():.2f}%\n")
-                    f.write(f"Max identity: {per_contig_df['percent_identity'].max():.2f}%\n")
-                    f.write(f"Average coverage: {per_contig_df['query_coverage'].mean():.2f}%\n\n")
-                    
-                    # Show top 10 contigs by identity
-                    f.write("Top 10 contigs by percent identity:\n")
-                    top_contigs = per_contig_df.nlargest(10, 'percent_identity')[
-                        ['contig_id', 'virus_name', 'segment', 'percent_identity', 'query_coverage', 'contig_length']
-                    ]
-                    f.write(top_contigs.to_string(index=False))
-                    f.write("\n")
+                    f.write(f"Contigs with a database hit: {n_hits}\n")
+
+                    if 'tier' in per_contig_df.columns:
+                        f.write("\nContigs by classification tier:\n")
+                        for tier, count in per_contig_df['tier'].value_counts().items():
+                            f.write(f"  {tier}: {count}\n")
+
+                    if n_hits > 0:
+                        f.write(f"\nAverage identity (hits only): {pid.mean():.2f}%\n")
+                        f.write(f"Median identity (hits only): {pid.median():.2f}%\n")
+                        f.write(f"Min identity: {pid.min():.2f}%\n")
+                        f.write(f"Max identity: {pid.max():.2f}%\n")
+                        f.write(f"Average coverage (hits only): {qcov.mean():.2f}%\n\n")
+
+                        top = per_contig_df.assign(_pid=pid).nlargest(10, '_pid')[
+                            ['contig_id', 'species', 'family', 'tier',
+                             'percent_identity', 'query_coverage', 'contig_length']
+                        ]
+                        f.write("Top 10 contigs by percent identity:\n")
+                        f.write(top.to_string(index=False))
+                        f.write("\n")
+                    else:
+                        f.write("\nNo contigs had a database hit.\n")
                 else:
                     f.write("No contig data available.\n")
-            except:
+            except Exception:
                 f.write("No per-contig data available.\n")
-            
+
             f.write("\n" + "="*80 + "\n")
-```

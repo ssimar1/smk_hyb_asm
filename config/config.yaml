@@ -7,17 +7,17 @@
 # Required inputs
 # -----------------------------------------------------------------------------
 # Pool identifier - used for naming output directories and summary files
-pool_id: "p1389"
+pool_id: "p2006"
 
 # Path to sample sheet (TSV with columns: Sample_ID, forward_read, reverse_read, read_compression, category)
-sample_sheet: "/data/projects/ssimar/projects/VirMap_EsViritu_comparison/RSV/p1389/p1389_sample_sheet.tsv"
+sample_sheet: "/data/projects/ssimar/GCID/p2006/RawSampleList"
 
 # Path to EsViritu database directory
 # This directory should contain:
 #   - Reference FASTA file (*.fasta, *.fa, or *.fna)
 #   - virus_pathogen_database.all_metadata.tsv
-esviritu_db: "/data/projects/ssimar/db/RSV_NCBI_DB2"
-# esviritu_db: "/biolib/prod/db/esviritu_DBs/v3.2.4"
+# esviritu_db: "/data/projects/ssimar/db/RSV_NCBI_DB2"
+esviritu_db: "/biolib/prod/db/esviritu_DBs/v3.2.4"
 # esviritu_db: "/data/projects/ssimar/db/NoV_NCBI"
 
 # Path to vector sequences for read removal
@@ -26,11 +26,18 @@ vector_fasta: "/data/prod/db/vector_dbs/nihcqv_hiv1/vector_seqs.fna"
 # Path to human host filter sequences
 host_fasta: "/biolib/prod/db/chm13v2phix/chm13v2phix.fa"
 
+#RVDB directories and configs 
+rvdb_nucl_db: "/data/projects/ssimar/db/RVDB/C-RVDBv32.0"
+rvdb_prot_db: "/data/projects/ssimar/db/RVDB/RVDBv32-prot"
+rvdb_taxonomy: "/data/projects/ssimar/db/RVDB/RVDBv32_taxonomy.tab"
+rvdb_min_identity: 90
+rvdb_min_coverage: 50
+
 # -----------------------------------------------------------------------------
 # Output directories
 # -----------------------------------------------------------------------------
 # Root output directory - all pipeline outputs will be placed here
-output_root: "/data/projects/ssimar/projects/VirMap_EsViritu_comparison/RSV/p1389/EsViritu_results"
+output_root: "/data/projects/ssimar/projects/VirMap_EsViritu_comparison/hyb_asm/p2006"
 
 # -----------------------------------------------------------------------------
 # Resource allocation - Preprocessing
@@ -73,10 +80,10 @@ checkv_threads: 16
 checkv_mem_mb: 16000
 
 # Threads for minimap2 (assembly merging)
-MERGE_THREADS: 4
+merge_threads: 4
 
 # Memory for minimap2 (in MB)
-MERGE_MEM_MB: 16000
+merge_mem_mb: 16000
 
 # -----------------------------------------------------------------------------
 # Hybrid Assembly Parameters
@@ -97,8 +104,8 @@ checkv_quality:
   - "Medium-quality"
 
 # Minimap2 merging parameters
-MERGE_MIN_OVERLAP: 500
-MERGE_MIN_IDENTITY: 95
+merge_min_overlap: 500
+merge_min_identity: 95
 
 # -----------------------------------------------------------------------------
 # Pipeline Stages - Set to true/false to control execution
